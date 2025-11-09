@@ -1,10 +1,10 @@
 # app.py
-# D2C Analytics Chat — GPT-5 (Natural Language, Fuzzy Filters, Diagnostics, and Narrative Results)
+# D2C Analytics Chat — GPT-5 (Fuzzy Filters, Smart Product Detection, Natural-Language Answers)
 
 import streamlit as st
 import pandas as pd
 import json, re, numpy as np
-from difflib import get_close_matches
+from difflib import get_close_matches, SequenceMatcher
 from openai import OpenAI
 
 st.set_page_config(page_title="D2C Analytics Chat — GPT-5", layout="wide")
@@ -19,7 +19,7 @@ NUMERIC_COLS = [
 ]
 
 # ---------------------------------------------------------------------
-# Helpers
+# Helper Functions
 # ---------------------------------------------------------------------
 def normalize_text_col(s: pd.Series):
     return s.astype(str).str.lower().str.strip().str.replace(r"[^a-z0-9\s\-]", "", regex=True)
@@ -67,7 +67,7 @@ def clean_dataframe(df):
     return df
 
 # ---------------------------------------------------------------------
-# GPT-5 Planner
+# GPT-5 Plan Generator
 # ---------------------------------------------------------------------
 def llm_parse_question(question, df):
     system_prompt = (
@@ -93,7 +93,7 @@ def llm_parse_question(question, df):
     return plan
 
 # ---------------------------------------------------------------------
-# Robust Execution with Fuzzy Filters
+# Execute Plan with Fuzzy Matching
 # ---------------------------------------------------------------------
 def execute_plan_robust(plan, df):
     df2 = df.copy()
@@ -104,53 +104,51 @@ def execute_plan_robust(plan, df):
     months_plan = [m.strip() for m in plan.get("months",[]) if m]
     markets_plan = [m.strip() for m in plan.get("marketplaces",[]) if m]
 
-    # ---------------- smarter product extraction ----------------
-     # ---------------- smarter product detection ----------------
-from difflib import SequenceMatcher
+    # -----------------------------------------------------------------
+    # Improved Product Detection from Question
+    # -----------------------------------------------------------------
+    question_text = plan.get("question_text", "")
+    product_candidates = []
 
-question_text = plan.get("question_text", "")
-product_candidates = []
+    # 1. Extract quoted or capitalized terms
+    quoted = re.findall(r"['\"]([^'\"]+)['\"]", question_text)
+    if quoted:
+        product_candidates.extend(quoted)
+    else:
+        caps = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,4})\b", question_text)
+        if caps:
+            product_candidates.extend(caps)
 
-# 1. Extract potential quoted or capitalized terms from the question
-quoted = re.findall(r"['\"]([^'\"]+)['\"]", question_text)
-if quoted:
-    product_candidates.extend(quoted)
-else:
-    caps = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,4})\b", question_text)
-    if caps:
-        product_candidates.extend(caps)
+    # 2. Fuzzy match against all products in dataset
+    if "Product Name" in df2.columns and len(df2["Product Name"].unique()) > 0:
+        products_list = df2["Product Name"].unique().tolist()
+        best_product = None
+        best_score = 0.0
+        for p in products_list:
+            score = SequenceMatcher(None, question_text.lower(), p.lower()).ratio()
+            if score > best_score:
+                best_product = p
+                best_score = score
+        if best_product and best_score > 0.4:
+            product_candidates = [best_product]
 
-# 2. Fuzzy match the question itself against all Product Names in the dataset
-if "Product Name" in df2.columns and len(df2["Product Name"].unique()) > 0:
-    products_list = df2["Product Name"].unique().tolist()
-    best_product = None
-    best_score = 0.0
-    for p in products_list:
-        score = SequenceMatcher(None, question_text.lower(), p.lower()).ratio()
-        if score > best_score:
-            best_product = p
-            best_score = score
-    if best_product and best_score > 0.4:  # threshold to avoid junk matches
-        product_candidates = [best_product]
+    # 3. Fallback if still empty
+    if not product_candidates:
+        product_candidates = ["Hyaluronic Acid Serum"]
 
-# 3. Fallback if still empty
-if not product_candidates:
-    product_candidates = ["Hyaluronic Acid Serum"]
-
-
-
-    # ---------------- fuzzy maps ----------------
+    # -----------------------------------------------------------------
+    # Fuzzy Mapping
+    # -----------------------------------------------------------------
     month_map = fuzzy_lookup_candidates(months_plan, df2["Month"].unique().tolist(), 0.4) if months_plan else {}
     market_map = fuzzy_lookup_candidates(markets_plan, df2["Marketplace"].unique().tolist(), 0.5) if markets_plan else {}
     prod_map = fuzzy_lookup_candidates(product_candidates, df2["Product Name"].unique().tolist(), 0.5) if product_candidates else {}
 
-    # ---------------- masks ----------------
     def make_mask(col_norm, patterns, mapping):
         if not patterns: return pd.Series(True, index=df2.index)
         mask = pd.Series(False, index=df2.index)
         for p in patterns:
             mapped = mapping.get(p)
-            token = re.sub(r"[^a-z]","",str(mapped or p).lower())
+            token = re.sub(r"[^a-z]", "", str(mapped or p).lower())
             mask |= df2[col_norm].str.contains(token, na=False)
         return mask.fillna(False)
 
@@ -175,11 +173,13 @@ if not product_candidates:
         "matched_all": int(combined.sum()),
     }
 
-    # ---------------- fallback: relax if empty ----------------
+    # -----------------------------------------------------------------
+    # Fallback: Relaxed Filter
+    # -----------------------------------------------------------------
     if df_fin.empty:
         relaxed = df2[mk_mask & p_mask]
         if len(relaxed) > 0:
-            st.warning("No exact match for month — showing results ignoring month filter.")
+            st.warning("No exact month match — showing results ignoring month filter.")
             df_fin = relaxed.copy()
         else:
             return {"empty":True,"debug":debug}
@@ -191,42 +191,45 @@ if not product_candidates:
 
     summary = {r["Marketplace"]: float(r["Net Revenue"]) for _,r in grouped.iterrows()}
     diff_abs = diff_pct = None
-    if len(grouped)>=2:
+    if len(grouped) >= 2:
         a,b = grouped.iloc[0]["Net Revenue"], grouped.iloc[1]["Net Revenue"]
-        diff_abs = a-b; diff_pct = diff_abs/b*100 if b!=0 else None
+        diff_abs = a - b
+        diff_pct = diff_abs / b * 100 if b != 0 else None
 
     return {"empty":False,"grouped":grouped,"summary":summary,
             "diff_abs":diff_abs,"diff_pct":diff_pct,"debug":debug}
 
 # ---------------------------------------------------------------------
-# Natural-Language Answer
+# Natural-Language Result Generator
 # ---------------------------------------------------------------------
 def generate_summary(question, result):
-    if result.get("empty"): 
+    if result.get("empty"):
         return "No rows matched the filters. Please check product or month naming."
     summary = result["summary"]
-    if not summary: return "No data found."
+    if not summary:
+        return "No data found."
     items = "\n".join([f"- {k} — ₹{v:,.2f}" for k,v in summary.items()])
     answer = f"Here are the results for your question:\n\n{items}"
     if result["diff_abs"] is not None:
-        if result["diff_abs"]>0:
-            a,b = list(summary.keys())[:2]
-            answer += f"\n\n{a} outperformed {b} by ₹{result['diff_abs']:,.2f} ({result['diff_pct']:.2f}%)."
-        else:
-            a,b = list(summary.keys())[:2]
-            answer += f"\n\n{b} outperformed {a} by ₹{abs(result['diff_abs']):,.2f} ({abs(result['diff_pct']):.2f}%)."
+        keys = list(summary.keys())
+        if len(keys) >= 2:
+            a,b = keys[:2]
+            if result["diff_abs"] > 0:
+                answer += f"\n\n{a} outperformed {b} by ₹{result['diff_abs']:,.2f} ({result['diff_pct']:.2f}%)."
+            else:
+                answer += f"\n\n{b} outperformed {a} by ₹{abs(result['diff_abs']):,.2f} ({abs(result['diff_pct']):.2f}%)."
     return answer
 
 # ---------------------------------------------------------------------
-# Streamlit UI
+# Streamlit Interface
 # ---------------------------------------------------------------------
-st.title("💬 D2C Analytics Chat)")
+st.title("💬 D2C Analytics Chat — GPT-5 (Fuzzy, Smart & Conversational)")
 
 with st.sidebar:
     st.header("Upload Dataset")
     file = st.file_uploader("Upload CSV or XLSX", type=["csv","xlsx"])
     if not file:
-        st.info("Please upload your dataset to begin.")
+        st.info("Please upload your dataset to start.")
         st.stop()
     df_raw = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
     st.success(f"Loaded {df_raw.shape[0]} rows × {df_raw.shape[1]} columns")
@@ -236,8 +239,9 @@ st.subheader("📄 Data Preview")
 st.dataframe(df.head())
 
 question = st.text_input("Ask a question (e.g., 'What was the revenue of Hyaluronic Acid Serum on Meesho vs Flipkart in September?')")
+
 if st.button("Run Query") and question.strip():
-    with st.spinner("Analyzing question using GPT-5..."):
+    with st.spinner("GPT-5 is analyzing your question..."):
         plan = llm_parse_question(question, df)
     st.markdown("### 🧠 Plan Generated by GPT-5")
     st.json(plan)
@@ -246,7 +250,7 @@ if st.button("Run Query") and question.strip():
         st.error("Failed to parse GPT-5 output.")
         st.stop()
 
-    with st.spinner("Executing plan and analyzing data..."):
+    with st.spinner("Running fuzzy analytics..."):
         result = execute_plan_robust(plan, df)
 
     st.markdown("### 📊 Results")
@@ -256,5 +260,6 @@ if st.button("Run Query") and question.strip():
     if not result.get("empty"):
         with st.expander("View Detailed Data Table"):
             st.dataframe(result["grouped"])
+
     with st.expander("🧩 Diagnostics (for debugging)"):
         st.json(result["debug"])
