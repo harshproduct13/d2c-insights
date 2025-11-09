@@ -198,7 +198,7 @@ def generate_summary(question, result):
 # ---------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------
-st.title("💬 D2C Analytics Chat — GPT-5 (Smart, Fuzzy & Conversational)")
+st.title("💬 D2C Analytics Chat)")
 
 with st.sidebar:
     st.header("Upload Dataset")
