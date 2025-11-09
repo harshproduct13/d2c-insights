@@ -105,7 +105,7 @@ def execute_plan_robust(plan, df):
     markets_plan = [m.strip() for m in plan.get("marketplaces",[]) if m]
 
     # ---------------- smarter product extraction ----------------
-   # ---------------- smarter product detection ----------------
+     # ---------------- smarter product detection ----------------
 from difflib import SequenceMatcher
 
 question_text = plan.get("question_text", "")
@@ -136,6 +136,7 @@ if "Product Name" in df2.columns and len(df2["Product Name"].unique()) > 0:
 # 3. Fallback if still empty
 if not product_candidates:
     product_candidates = ["Hyaluronic Acid Serum"]
+
 
 
     # ---------------- fuzzy maps ----------------
