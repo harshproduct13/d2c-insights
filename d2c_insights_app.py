@@ -96,36 +96,59 @@ def execute_plan(plan: dict, df: pd.DataFrame) -> dict:
     visualization = plan.get('visualization', 'table')
 
     # Filter by month and marketplace
-    mask_month = df['Month'].str.contains('|'.join([re.escape(m) for m in months]), case=False, na=False) if months else pd.Series([True]*len(df))
-    mask_market = df['Marketplace'].isin(markets) if markets else pd.Series([True]*len(df))
+    mask_month = (
+        df['Month'].str.contains('|'.join([re.escape(m) for m in months]), case=False, na=False)
+        if months else pd.Series([True] * len(df))
+    )
+    mask_market = (
+        df['Marketplace'].isin(markets)
+        if markets else pd.Series([True] * len(df))
+    )
     df_filtered = df[mask_month & mask_market].copy()
 
-    metric_list = ['Sale (Qty.)','Sale (Amount)','Return (Qty)','Return (Amount)','Net Revenue','Gross COGS','GM']
+    metric_list = [
+        'Sale (Qty.)','Sale (Amount)','Return (Qty)','Return (Amount)',
+        'Net Revenue','Gross COGS','GM'
+    ]
     use_metrics = [c for c in metric_list if c in df_filtered.columns]
 
-    if not group_by:
-        group_by = ['Product Name']
+    # ✅ Validate group_by columns
+    valid_group_by = [col for col in group_by if col in df_filtered.columns]
+    if not valid_group_by:
+        valid_group_by = ['Product Name']
 
-    grouped = df_filtered.groupby(group_by)[use_metrics].sum().reset_index()
+    grouped = (
+        df_filtered.groupby(valid_group_by)[use_metrics]
+        .sum()
+        .reset_index()
+    )
 
+    # Sort by metric
     if metric in grouped.columns:
         grouped = grouped.sort_values(metric, ascending=False)
 
     top_products = grouped.head(top_n)
 
-    # Trend or comparison logic
-    if 'Month' in group_by:
-        grouped['Month'] = pd.Categorical(grouped['Month'], ordered=True, categories=sorted(df['Month'].unique().tolist()))
+    # Trend logic (for MoM %)
+    if 'Month' in valid_group_by and metric in grouped.columns:
+        grouped['Month'] = pd.Categorical(
+            grouped['Month'],
+            ordered=True,
+            categories=sorted(df['Month'].unique().tolist())
+        )
         grouped = grouped.sort_values(['Product Name', 'Month'])
-        grouped['MoM Change'] = grouped.groupby('Product Name')[metric].pct_change() * 100
+        grouped['MoM Change (%)'] = grouped.groupby('Product Name')[metric].pct_change() * 100
 
     # Derived metrics
     if 'Return (Qty)' in grouped.columns and 'Sale (Qty.)' in grouped.columns:
-        grouped['Return Rate %'] = (grouped['Return (Qty)'] / grouped['Sale (Qty.)'] * 100).round(2)
+        grouped['Return Rate (%)'] = (
+            grouped['Return (Qty)'] / grouped['Sale (Qty.)'] * 100
+        ).round(2)
 
-    # Gross margin percentage
     if 'Net Revenue' in grouped.columns and 'Gross COGS' in grouped.columns:
-        grouped['GM%'] = (grouped['Net Revenue'] - grouped['Gross COGS']) / grouped['Net Revenue'] * 100
+        grouped['GM%'] = (
+            (grouped['Net Revenue'] - grouped['Gross COGS']) / grouped['Net Revenue'] * 100
+        ).round(2)
 
     return {
         'filtered_rows': len(df_filtered),
@@ -133,8 +156,9 @@ def execute_plan(plan: dict, df: pd.DataFrame) -> dict:
         'top_products': top_products,
         'visualization': visualization,
         'metric': metric,
-        'group_by': group_by
+        'group_by': valid_group_by,
     }
+
 
 # ---------------------- STREAMLIT UI ----------------------
 
