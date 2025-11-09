@@ -1,6 +1,6 @@
 # streamlit_d2c_chat_app.py
-# Streamlit app: Upload D2C marketplace CSV, ask natural-language queries, get stepwise answers with trends, comparisons, and charts.
-# Uses GPT-5 to interpret any question and return structured analysis + visualizations.
+# D2C Analytics Chat — GPT-5 (Trends, Comparisons & Charts)
+# Upload your marketplace data, ask questions in natural language, and GPT-5 will create a step-by-step plan and analysis.
 
 import streamlit as st
 import pandas as pd
@@ -10,7 +10,7 @@ import re
 
 st.set_page_config(page_title="D2C Analytics Chat (GPT-5)", layout="wide")
 
-# ---------------------- Setup ----------------------
+# ---------------------- SETUP ----------------------
 
 openai.api_key = st.secrets.get("OPENAI_API_KEY")
 
@@ -22,7 +22,7 @@ NUMERIC_COLS = [
     'Gross COGS','GM'
 ]
 
-# ---------------------- Helper: Data cleaning ----------------------
+# ---------------------- DATA CLEANING ----------------------
 
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -46,20 +46,21 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-# ---------------------- GPT-5 Natural Language Parser ----------------------
+# ---------------------- GPT-5 NATURAL LANGUAGE PARSER ----------------------
 
 def llm_parse_question(question: str, df: pd.DataFrame) -> dict:
     available_markets = sorted(df['Marketplace'].dropna().unique().tolist()) if 'Marketplace' in df.columns else []
     available_months = sorted(df['Month'].dropna().unique().tolist()) if 'Month' in df.columns else []
 
     system_prompt = (
-        "You are GPT-5, a highly advanced data analysis planner for a D2C analytics system.\n"
+        "You are GPT-5, a world-class data analysis planner for a D2C analytics system.\n"
         "Given a user's natural language question and the dataset columns (month, marketplace, product name, sales, returns, revenue, COGS, GM),\n"
         "produce a structured JSON plan describing exactly how to answer the question using pandas.\n"
-        "The JSON must contain: { 'months': [list], 'marketplaces': [list], 'metric': 'string', 'top_n': int, 'group_by': [list], 'operations': [list], 'visualization': 'string', 'steps': [list] }.\n"
-        "If the question asks for trends, comparisons, or ratios, include the logic (e.g., group by month, compute % change, calculate ratios).\n"
+        "JSON must contain: { 'months': [list], 'marketplaces': [list], 'metric': 'string', 'top_n': int, 'group_by': [list], "
+        "'operations': [list], 'visualization': 'string', 'steps': [list] }.\n"
+        "If the question asks for trends, comparisons, or ratios, include logic such as grouping by month, computing % change, or calculating ratios.\n"
         "Valid visualizations: 'line_chart', 'bar_chart', 'pie_chart', 'table', or 'summary'.\n"
-        "Default to showing all marketplaces/months if not specified.\n"
+        "Default to showing all marketplaces and months if not specified."
     )
 
     user_prompt = f"Question: {question}\nAvailable Marketplaces: {available_markets}\nAvailable Months: {available_months}"
@@ -79,7 +80,7 @@ def llm_parse_question(question: str, df: pd.DataFrame) -> dict:
         plan = {"error": "Failed to parse GPT-5 response", "raw": plan_text}
     return plan
 
-# ---------------------- Step Execution ----------------------
+# ---------------------- EXECUTION LOGIC ----------------------
 
 def execute_plan(plan: dict, df: pd.DataFrame) -> dict:
     months = plan.get('months', [])
@@ -89,6 +90,7 @@ def execute_plan(plan: dict, df: pd.DataFrame) -> dict:
     group_by = plan.get('group_by', [])
     visualization = plan.get('visualization', 'table')
 
+    # Filter by month and marketplace
     mask_month = df['Month'].str.contains('|'.join([re.escape(m) for m in months]), case=False, na=False) if months else pd.Series([True]*len(df))
     mask_market = df['Marketplace'].isin(markets) if markets else pd.Series([True]*len(df))
     df_filtered = df[mask_month & mask_market].copy()
@@ -129,7 +131,7 @@ def execute_plan(plan: dict, df: pd.DataFrame) -> dict:
         'group_by': group_by
     }
 
-# ---------------------- Streamlit UI ----------------------
+# ---------------------- STREAMLIT UI ----------------------
 
 st.title("D2C Analytics Chat — GPT-5 (Trends, Comparisons & Charts)")
 
@@ -146,7 +148,9 @@ with st.sidebar:
         st.info("Please upload your dataset to begin.")
         raw_df = None
 
-if not raw_df:
+# ✅ FIX for ambiguous DataFrame check
+if raw_df is None or raw_df.empty:
+    st.info("Please upload a valid dataset to begin.")
     st.stop()
 
 df = clean_dataframe(raw_df)
@@ -178,9 +182,6 @@ if st.button("Run Query") and question.strip():
             st.line_chart(grouped.set_index('Month')[metric])
         elif vis == 'bar_chart':
             st.bar_chart(grouped.set_index(result['group_by'][0])[metric])
-        elif vis == 'pie_chart':
-            st.write("Pie Chart is not natively supported yet; displaying table instead.")
-            st.dataframe(grouped)
         else:
             st.dataframe(grouped)
 
@@ -191,4 +192,4 @@ if st.button("Run Query") and question.strip():
         )
 
 st.markdown("---")
-st.caption("This version of the app uses GPT-5 to understand natural language questions including trends, comparisons, ratios, and visual insights. It dynamically produces the right pandas logic and charts.")
+st.caption("This version of the app uses GPT-5 to interpret natural language questions including trends, comparisons, ratios, and visual insights.")
