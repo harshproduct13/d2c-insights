@@ -1,267 +1,205 @@
 # app.py
 # D2C Analytics Chat — GPT-5
-# Natural language analytics with fuzzy matching and smart summaries
+# Natural-language analytics with fuzzy filtering, diagnostics, and narrative summaries
 
 import streamlit as st
 import pandas as pd
 import json
 import re
+import numpy as np
 from difflib import get_close_matches
 from openai import OpenAI
 
-# -------------------- SETUP --------------------
 st.set_page_config(page_title="D2C Analytics Chat (GPT-5)", layout="wide")
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 NUMERIC_COLS = [
-    'Sale (Qty.)','Sale (Amount)','Return (Qty)','Return (Amount)',
-    'GMV','Less Discount','Gross Revenue','Less Returns',
-    'Gross Revenue (Inc. GST) Post Returns','Less GST','Net Revenue',
-    'COGS Sales','COGS Returns','COGS Free Replacement','Gross COGS','GM'
+    "Sale (Qty.)","Sale (Amount)","Return (Qty)","Return (Amount)",
+    "GMV","Less Discount","Gross Revenue","Less Returns",
+    "Gross Revenue (Inc. GST) Post Returns","Less GST","Net Revenue",
+    "COGS Sales","COGS Returns","COGS Free Replacement","Gross COGS","GM"
 ]
 
-# -------------------- DATA CLEANING --------------------
-def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+# --------------------------- Helpers ---------------------------
+def normalize_text_col(s: pd.Series):
+    return s.astype(str).str.lower().str.strip().str.replace(r"[^a-z0-9\s\-]", "", regex=True)
+
+def fuzzy_lookup_candidates(candidate_list, valid_values, cutoff=0.6):
+    mapping = {}
+    valid_lower = [str(v).lower() for v in valid_values]
+    for c in candidate_list:
+        cstr = str(c).lower()
+        matches = [v for v in valid_values if cstr in str(v).lower()]
+        if matches:
+            mapping[c] = matches[0]; continue
+        close = get_close_matches(cstr, valid_lower, n=1, cutoff=cutoff)
+        if close:
+            idx = valid_lower.index(close[0])
+            mapping[c] = valid_values[idx]
+        else:
+            mapping[c] = None
+    return mapping
+
+def clean_dataframe(df):
     df = df.copy()
     df.columns = [c.strip() for c in df.columns]
-    if 'Month' in df.columns:
-        df['Month'] = df['Month'].astype(str).str.strip()
-
-    for c in df.columns:
-        if df[c].dtype == object:
-            df[c] = df[c].astype(str).str.replace(',', '').str.strip()
-
     for c in NUMERIC_COLS:
         if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
-
-    if 'Marketplace' not in df.columns:
-        df['Marketplace'] = 'Unknown'
-    if 'Product Name' not in df.columns:
-        df['Product Name'] = 'Unknown'
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ""), errors="coerce").fillna(0.0)
+    for col in ["Month","Product Name","Marketplace"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
     return df
 
-# -------------------- FUZZY MATCHING --------------------
-def fuzzy_fix_plan(plan: dict, df: pd.DataFrame) -> dict:
-    valid_cols = [c.strip() for c in df.columns.tolist()]
-
-    def best_match(value):
-        if not isinstance(value, str):
-            return value
-        match = get_close_matches(value.strip(), valid_cols, n=1, cutoff=0.6)
-        return match[0] if match else value
-
-    fuzzy_log = {}
-
-    # Fix metric
-    metric = plan.get('metric', '')
-    fixed_metric = best_match(metric)
-    fuzzy_log['metric'] = {'input': metric, 'fixed': fixed_metric}
-    plan['metric'] = fixed_metric
-
-    # Fix group_by
-    if 'group_by' in plan and isinstance(plan['group_by'], list):
-        corrected = []
-        for g in plan['group_by']:
-            fixed = best_match(g)
-            if fixed in valid_cols:
-                corrected.append(fixed)
-            fuzzy_log[g] = fixed
-        plan['group_by'] = corrected
-
-    if not plan.get('group_by'):
-        plan['group_by'] = ['Product Name'] if 'Product Name' in valid_cols else [valid_cols[0]]
-
-    if 'operations' in plan and isinstance(plan['operations'], list):
-        plan['operations'] = [best_match(op) for op in plan['operations']]
-
-    if plan['metric'] not in valid_cols:
-        plan['metric'] = 'Net Revenue' if 'Net Revenue' in valid_cols else valid_cols[-1]
-
-    plan['_fuzzy_log'] = fuzzy_log
-    return plan
-
-# -------------------- GPT-5 PLAN PARSER --------------------
-def llm_parse_question(question: str, df: pd.DataFrame) -> dict:
-    available_cols = list(df.columns)
-    available_markets = sorted(df['Marketplace'].dropna().unique().tolist()) if 'Marketplace' in df.columns else []
-    available_months = sorted(df['Month'].dropna().unique().tolist()) if 'Month' in df.columns else []
-
+# --------------------------- GPT-5 Parsing ---------------------------
+def llm_parse_question(question, df):
     system_prompt = (
-        "You are GPT-5, a world-class data analysis planner for a D2C analytics system.\n"
+        "You are GPT-5, a D2C analytics planner. "
         "Given a user's natural-language question and dataset columns, "
-        "produce a structured JSON plan describing how to answer the question using pandas.\n"
-        "JSON must contain: { 'months':[list], 'marketplaces':[list], 'metric':'string', "
-        "'top_n':int, 'group_by':[list], 'operations':[list], 'visualization':'string', 'steps':[list] }.\n"
-        "Use column names similar to those provided; small naming differences are fine."
+        "produce a JSON plan with keys: months, marketplaces, metric, top_n, "
+        "group_by, operations, steps. Use similar but not exact column names."
     )
-
-    user_prompt = (
-        f"Question: {question}\n"
-        f"Available columns: {available_cols}\n"
-        f"Available marketplaces: {available_markets}\n"
-        f"Available months: {available_months}"
-    )
-
+    user_prompt = f"Question: {question}\nAvailable columns: {list(df.columns)}"
     response = client.chat.completions.create(
         model="gpt-5",
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
+            {"role":"system","content":system_prompt},
+            {"role":"user","content":user_prompt}
         ]
     )
-
-    plan_text = response.choices[0].message.content
+    text = response.choices[0].message.content
     try:
-        plan = json.loads(plan_text)
-    except json.JSONDecodeError:
-        return {"error": "Failed to parse GPT-5 response", "raw": plan_text}
+        plan = json.loads(text)
+    except:
+        plan = {"error":"failed to parse","raw":text}
+    return plan
 
-    return fuzzy_fix_plan(plan, df)
+# --------------------------- Robust Execution ---------------------------
+def execute_plan_robust(plan, df):
+    df2 = df.copy()
+    df2["_month_norm"] = normalize_text_col(df2["Month"]) if "Month" in df2.columns else ""
+    df2["_product_norm"] = normalize_text_col(df2["Product Name"]) if "Product Name" in df2.columns else ""
+    df2["_marketplace_norm"] = normalize_text_col(df2["Marketplace"]) if "Marketplace" in df2.columns else ""
 
-# -------------------- EXECUTION --------------------
-def execute_plan(plan: dict, df: pd.DataFrame) -> dict:
-    months = plan.get('months', [])
-    markets = plan.get('marketplaces', [])
-    metric = plan.get('metric', 'Net Revenue')
-    top_n = plan.get('top_n', 5)
-    group_by = plan.get('group_by', [])
-    visualization = plan.get('visualization', 'table')
+    months_plan = [m.strip() for m in plan.get("months",[]) if m]
+    markets_plan = [m.strip() for m in plan.get("marketplaces",[]) if m]
 
-    mask_month = (
-        df['Month'].str.contains('|'.join([re.escape(m) for m in months]), case=False, na=False)
-        if months else pd.Series([True] * len(df))
-    )
-    mask_market = (
-        df['Marketplace'].isin(markets)
-        if markets else pd.Series([True] * len(df))
-    )
-    df_filtered = df[mask_month & mask_market].copy()
+    # try to find product name candidate
+    product_candidates = []
+    for op in plan.get("operations",[]):
+        if "product" in str(op).lower():
+            m = re.search(r"['\"]([^'\"]+)['\"]", str(op))
+            if m: product_candidates.append(m.group(1))
 
-    metric_list = [
-        'Sale (Qty.)','Sale (Amount)','Return (Qty)','Return (Amount)',
-        'Net Revenue','Gross COGS','GM'
-    ]
-    use_metrics = [c for c in metric_list if c in df_filtered.columns]
+    # fuzzy maps
+    month_map = fuzzy_lookup_candidates(months_plan, df2["Month"].unique().tolist(), 0.4) if months_plan else {}
+    market_map = fuzzy_lookup_candidates(markets_plan, df2["Marketplace"].unique().tolist(), 0.5) if markets_plan else {}
+    prod_map = fuzzy_lookup_candidates(product_candidates, df2["Product Name"].unique().tolist(), 0.5) if product_candidates else {}
 
-    valid_group_by = [g for g in group_by if g in df_filtered.columns]
-    if not valid_group_by:
-        valid_group_by = ['Product Name']
+    # boolean masks
+    def make_mask(col_norm, patterns, mapping):
+        if not patterns: return pd.Series(True, index=df2.index)
+        mask = pd.Series(False, index=df2.index)
+        for p in patterns:
+            mapped = mapping.get(p)
+            token = re.sub(r"[^a-z0-9]","",str(mapped or p).lower())
+            mask |= df2[col_norm].str.contains(token, na=False)
+        return mask
 
-    grouped = df_filtered.groupby(valid_group_by)[use_metrics].sum().reset_index()
+    m_mask = make_mask("_month_norm", months_plan, month_map)
+    mk_mask = make_mask("_marketplace_norm", markets_plan, market_map)
+    p_mask = make_mask("_product_norm", product_candidates, prod_map)
 
-    if metric in grouped.columns:
-        grouped = grouped.sort_values(metric, ascending=False)
+    combined = m_mask & mk_mask & p_mask
+    df_fin = df2[combined].copy()
 
-    top_products = grouped.head(top_n)
-
-    # Derived metrics
-    if 'Return (Qty)' in grouped.columns and 'Sale (Qty.)' in grouped.columns:
-        grouped['Return Rate (%)'] = (grouped['Return (Qty)'] / grouped['Sale (Qty.)'] * 100).round(2)
-    if 'Net Revenue' in grouped.columns and 'Gross COGS' in grouped.columns:
-        grouped['GM%'] = ((grouped['Net Revenue'] - grouped['Gross COGS']) / grouped['Net Revenue'] * 100).round(2)
-
-    return {
-        'filtered_rows': len(df_filtered),
-        'grouped': grouped,
-        'top_products': top_products,
-        'visualization': visualization,
-        'metric': metric,
-        'group_by': valid_group_by,
-        'fuzzy_log': plan.get('_fuzzy_log', {})
+    debug = {
+        "rows_total":len(df2),
+        "months_plan":months_plan,
+        "month_map":month_map,
+        "markets_plan":markets_plan,
+        "market_map":market_map,
+        "product_candidates":product_candidates,
+        "prod_map":prod_map,
+        "matched_after_month":int(m_mask.sum()),
+        "matched_after_market":int(mk_mask.sum()),
+        "matched_after_product":int(p_mask.sum()),
+        "matched_all":int(combined.sum()),
     }
 
-# -------------------- NATURAL-LANGUAGE ANSWER --------------------
-def generate_natural_language_answer(question, result_df, metric_col="Net Revenue", top_n=5):
-    if result_df.empty:
-        return "No results found for your query."
+    if df_fin.empty:
+        return {"empty":True,"debug":debug}
 
-    display_df = result_df.head(top_n)
-    summary_records = []
-    for _, row in display_df.iterrows():
-        name = row.get('Product Name', 'Unknown')
-        val = row.get(metric_col, None)
-        if pd.notna(val):
-            summary_records.append(f"{name} — ₹{val:,.2f}")
+    if "Net Revenue" not in df_fin.columns:
+        df_fin["Net Revenue"] = df_fin.get("Sale (Amount)",0) - df_fin.get("Return (Amount)",0)
 
-    data_json = json.dumps(summary_records, indent=2)
-    prompt = f"""
-    The user asked: "{question}"
-    Here are the top results:
-    {data_json}
+    grouped = df_fin.groupby("Marketplace",as_index=False)["Net Revenue"].sum().sort_values("Net Revenue",ascending=False)
 
-    Write a short, clear, natural-language summary mentioning the products and their {metric_col} values in ₹.
-    Begin with a sentence like 'Here are the top 5 selling products in July in terms of net revenue:'.
-    """
+    # Comparison if 2 marketplaces
+    summary = {}
+    if len(grouped)>=1:
+        for _,r in grouped.iterrows():
+            summary[r["Marketplace"]] = float(r["Net Revenue"])
+    diff_abs = diff_pct = None
+    if len(grouped)>=2:
+        a,b = grouped.iloc[0]["Net Revenue"], grouped.iloc[1]["Net Revenue"]
+        diff_abs = a-b; diff_pct = diff_abs/b*100 if b!=0 else None
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {"role": "system", "content": "You are a business analyst summarizing data clearly and concisely."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Error generating summary: {e}"
+    return {
+        "empty":False,
+        "grouped":grouped,
+        "summary":summary,
+        "diff_abs":diff_abs,
+        "diff_pct":diff_pct,
+        "debug":debug
+    }
 
-# -------------------- STREAMLIT UI --------------------
-st.title("D2C Analytics Chat — GPT-5 (Natural Language Answers + Fuzzy Matching)")
+# --------------------------- Natural-Language Answer ---------------------------
+def generate_summary(question, result):
+    if result.get("empty"): return "No rows matched the filters. Please check product or month naming."
+    summary = result["summary"]
+    if not summary: return "No data found."
+    items = "\n".join([f"- {k} — ₹{v:,.2f}" for k,v in summary.items()])
+    answer = f"Here are the results for your question:\n\n{items}"
+    if result["diff_abs"] is not None:
+        if result["diff_abs"]>0:
+            answer += f"\n\n{list(summary.keys())[0]} outperformed {list(summary.keys())[1]} by ₹{result['diff_abs']:,.2f} ({result['diff_pct']:.2f}%)."
+        else:
+            answer += f"\n\n{list(summary.keys())[1]} outperformed {list(summary.keys())[0]} by ₹{abs(result['diff_abs']):,.2f} ({abs(result['diff_pct']):.2f}%)."
+    return answer
+
+# --------------------------- Streamlit UI ---------------------------
+st.title("D2C Analytics Chat — GPT-5 (Fuzzy, Smart & Natural)")
 
 with st.sidebar:
     st.header("Upload Dataset")
-    uploaded_file = st.file_uploader("Upload your D2C data (CSV/XLSX)", type=['csv','xlsx'])
-    if uploaded_file:
-        if uploaded_file.name.endswith('.csv'):
-            raw_df = pd.read_csv(uploaded_file)
-        else:
-            raw_df = pd.read_excel(uploaded_file)
-        st.success(f"Loaded {raw_df.shape[0]} rows, {raw_df.shape[1]} columns")
+    f = st.file_uploader("Upload your D2C CSV/XLSX", type=["csv","xlsx"])
+    if f:
+        df_raw = pd.read_csv(f) if f.name.endswith(".csv") else pd.read_excel(f)
+        st.success(f"Loaded {df_raw.shape[0]} rows, {df_raw.shape[1]} cols")
     else:
-        st.info("Please upload your dataset to begin.")
-        raw_df = None
+        st.info("Please upload your dataset."); st.stop()
 
-if raw_df is None or raw_df.empty:
-    st.stop()
+df = clean_dataframe(df_raw)
+st.subheader("Preview Data"); st.dataframe(df.head())
 
-df = clean_dataframe(raw_df)
-
-st.subheader("Preview Cleaned Data")
-st.dataframe(df.head(100))
-
-st.subheader("Ask a Question (Natural Language)")
-question = st.text_input("e.g., 'Show top 5 products by net revenue in July across all marketplaces.'")
-
+question = st.text_input("Ask a question in natural language")
 if st.button("Run Query") and question.strip():
-    with st.spinner("GPT-5 is understanding your question..."):
+    with st.spinner("GPT-5 is understanding your query..."):
         plan = llm_parse_question(question, df)
-    st.markdown("### Plan Generated by GPT-5")
-    st.json(plan)
+    st.markdown("### Plan Generated by GPT-5"); st.json(plan)
 
-    if 'error' not in plan:
-        with st.spinner("Running analysis..."):
-            result = execute_plan(plan, df)
+    if "error" in plan: st.stop()
 
-        st.markdown("### Results")
-        st.write(f"Filtered Rows: {result['filtered_rows']}")
+    with st.spinner("Executing robust plan..."):
+        result = execute_plan_robust(plan, df)
 
-        # 🗣️ Generate and display natural-language answer
-        answer_text = generate_natural_language_answer(question, result['top_products'], metric_col=result['metric'])
-        st.markdown(answer_text)
+    st.markdown("### Results")
+    answer = generate_summary(question, result)
+    st.markdown(answer)
 
-        # Optional detailed data view
-        with st.expander("View Detailed Data Table"):
-            st.dataframe(result['top_products'])
-
-        with st.expander("Fuzzy Matching Corrections"):
-            st.json(result['fuzzy_log'])
-
-        st.download_button(
-            label="Download Results CSV",
-            data=result['top_products'].to_csv(index=False).encode('utf-8'),
-            file_name="analysis_results.csv"
-        )
-
-st.markdown("---")
-st.caption("Powered by GPT-5 — natural-language analytics for D2C businesses.")
+    if not result.get("empty"):
+        with st.expander("Detailed Table"):
+            st.dataframe(result["grouped"])
+    with st.expander("Diagnostics (for debugging)"):
+        st.json(result["debug"])
