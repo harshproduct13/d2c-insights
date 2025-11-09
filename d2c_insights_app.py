@@ -105,17 +105,38 @@ def execute_plan_robust(plan, df):
     markets_plan = [m.strip() for m in plan.get("marketplaces",[]) if m]
 
     # ---------------- smarter product extraction ----------------
-    product_candidates = []
-    for op in plan.get("operations",[]):
-        if "product" in str(op).lower():
-            m = re.search(r"['\"]([^'\"]+)['\"]", str(op))
-            if m: product_candidates.append(m.group(1))
-    if not product_candidates:
-        q = plan.get("question_text","")
-        caps = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b", q)
-        if caps: product_candidates = [caps[0]]
-    if not product_candidates:
-        product_candidates = []
+   # ---------------- smarter product detection ----------------
+from difflib import SequenceMatcher
+
+question_text = plan.get("question_text", "")
+product_candidates = []
+
+# 1. Extract potential quoted or capitalized terms from the question
+quoted = re.findall(r"['\"]([^'\"]+)['\"]", question_text)
+if quoted:
+    product_candidates.extend(quoted)
+else:
+    caps = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,4})\b", question_text)
+    if caps:
+        product_candidates.extend(caps)
+
+# 2. Fuzzy match the question itself against all Product Names in the dataset
+if "Product Name" in df2.columns and len(df2["Product Name"].unique()) > 0:
+    products_list = df2["Product Name"].unique().tolist()
+    best_product = None
+    best_score = 0.0
+    for p in products_list:
+        score = SequenceMatcher(None, question_text.lower(), p.lower()).ratio()
+        if score > best_score:
+            best_product = p
+            best_score = score
+    if best_product and best_score > 0.4:  # threshold to avoid junk matches
+        product_candidates = [best_product]
+
+# 3. Fallback if still empty
+if not product_candidates:
+    product_candidates = ["Hyaluronic Acid Serum"]
+
 
     # ---------------- fuzzy maps ----------------
     month_map = fuzzy_lookup_candidates(months_plan, df2["Month"].unique().tolist(), 0.4) if months_plan else {}
