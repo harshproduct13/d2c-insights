@@ -54,18 +54,22 @@ def llm_parse_question(question: str, df: pd.DataFrame) -> dict:
 
     system_prompt = (
         "You are GPT-5, a world-class data analysis planner for a D2C analytics system.\n"
-        "Given a user's natural language question and the dataset columns (month, marketplace, product name, sales, returns, revenue, COGS, GM),\n"
+        "Given a user's natural language question and dataset columns (month, marketplace, product name, sales, returns, revenue, COGS, GM),\n"
         "produce a structured JSON plan describing exactly how to answer the question using pandas.\n"
-        "JSON must contain: { 'months': [list], 'marketplaces': [list], 'metric': 'string', 'top_n': int, 'group_by': [list], "
+        "The JSON must contain: { 'months': [list], 'marketplaces': [list], 'metric': 'string', 'top_n': int, 'group_by': [list], "
         "'operations': [list], 'visualization': 'string', 'steps': [list] }.\n"
-        "If the question asks for trends, comparisons, or ratios, include logic such as grouping by month, computing % change, or calculating ratios.\n"
+        "If the question asks for trends, comparisons, or ratios, include the logic such as grouping by month or computing % change.\n"
         "Valid visualizations: 'line_chart', 'bar_chart', 'pie_chart', 'table', or 'summary'.\n"
-        "Default to showing all marketplaces and months if not specified."
+        "Default to showing all marketplaces/months if not specified."
     )
 
     user_prompt = f"Question: {question}\nAvailable Marketplaces: {available_markets}\nAvailable Months: {available_months}"
 
-    response = openai.ChatCompletion.create(
+    # ✅ FIX: New OpenAI v1 client syntax
+    from openai import OpenAI
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
+    response = client.chat.completions.create(
         model="gpt-5",
         messages=[
             {"role": "system", "content": system_prompt},
@@ -73,12 +77,13 @@ def llm_parse_question(question: str, df: pd.DataFrame) -> dict:
         ]
     )
 
-    plan_text = response.choices[0].message['content']
+    plan_text = response.choices[0].message.content
     try:
         plan = json.loads(plan_text)
     except json.JSONDecodeError:
         plan = {"error": "Failed to parse GPT-5 response", "raw": plan_text}
     return plan
+
 
 # ---------------------- EXECUTION LOGIC ----------------------
 
